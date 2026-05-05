@@ -1,0 +1,16 @@
+{
+  "name": "Sovereign Archive",
+  "short_name": "Sovereign",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#4c56af",
+  "icons": [
+    {
+      "src": "https://img.icons8.com/isometric/512/safe.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "description": "High-end secure digital vault for intellectual capital."
+}

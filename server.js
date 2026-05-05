@@ -1,0 +1,350 @@
+import "dotenv/config";
+import express from "express";
+import { createServer as createViteServer } from "vite";
+import path from "path";
+import { fileURLToPath } from "url";
+import mongoose from "mongoose";
+import UserModel from "./models/User.js";
+import { Server } from "socket.io";
+import { createServer } from "http";
+import jwt from "jsonwebtoken";
+import crypto from "crypto";
+import { initializeEmailService, sendPasswordResetEmail, verifyEmailService } from "./lib/emailService.js";
+import rateLimit from "express-rate-limit";
+import { body, validationResult } from "express-validator";
+import cors from "cors";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Connect to MongoDB
+const connectDB = async () => {
+  try {
+    const uri = process.env.MONGODB_URI;
+
+    if (!uri) {
+      console.warn("MONGODB_URI is not defined. Using local fallback.");
+    } else if (uri.includes("<password>") || uri.includes("[password]")) {
+      throw new Error("MONGODB_URI contains placeholder credentials (<password> or [password]). Please update it in Settings.");
+    }
+
+    const connectionUri = uri || "mongodb://localhost:27017/sovereign_archive";
+
+    await mongoose.connect(connectionUri, {
+      serverSelectionTimeoutMS: 5000, // Timeout after 5 seconds
+    });
+
+    console.log("MongoDB connected successfully");
+  } catch (err) {
+    if (err.message.includes("auth failed") || err.message.includes("bad auth")) {
+      console.error("❌ MongoDB Auth Failed: Please check your username and password in the MONGODB_URI.");
+      console.error("Ensure special characters in the password are URL-encoded (e.g., '@' as '%40').");
+    } else {
+      console.error("❌ MongoDB connection error:", err.message);
+    }
+    console.log("⚠️ App will continue with limited functionality for development.");
+  }
+};
+
+async function startServer() {
+  await connectDB();
+  initializeEmailService();
+  await verifyEmailService();
+  const app = express();
+  const PORT = 3000;
+
+  const httpServer = createServer(app);
+  const io = new Server(httpServer, {
+    cors: {
+      origin: "*",
+    }
+  });
+
+  io.on("connection", (socket) => {
+    console.log("A user connected:", socket.id);
+    socket.on("disconnect", () => {
+      console.log("User disconnected:", socket.id);
+    });
+  });
+
+  // CORS Configuration
+  const corsOptions = {
+    origin: process.env.CLIENT_URL || "http://localhost:5173",
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+  };
+  app.use(cors(corsOptions));
+
+  // Use JSON middleware for API routes (with size limit)
+  app.use(express.json({ limit: "10kb" }));
+
+  // Rate limiters
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 5, // 5 requests per windowMs
+    message: "Too many authentication attempts, please try again after 15 minutes",
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
+  const forgotPasswordLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 3, // 3 attempts per hour
+    message: "Too many password reset attempts, please try again after an hour",
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
+  const resetPasswordLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 5, // 5 attempts per hour
+    message: "Too many password reset attempts, please try again after an hour",
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
+  // Validation error handler middleware
+  const handleValidationErrors = (req, res, next) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ error: errors.array()[0].msg });
+    }
+    next();
+  };
+
+  // JWT helper to sign tokens
+  const signToken = (userId, email) => {
+    return jwt.sign(
+      { id: userId, email },
+      process.env.JWT_SECRET || "default_secret",
+      { expiresIn: "7d" }
+    );
+  };
+
+  // Middleware to verify JWT
+  const verifyToken = (req, res, next) => {
+    const token = req.headers.authorization?.split(" ")[1];
+    if (!token) return res.status(401).json({ error: "No token provided" });
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || "default_secret");
+      req.user = decoded;
+      next();
+    } catch (err) {
+      res.status(401).json({ error: "Invalid token" });
+    }
+  };
+
+  // --- Authentication API ---
+  app.post(
+    "/api/auth/signup",
+    authLimiter,
+    body("email").isEmail().normalizeEmail(),
+    body("password").isLength({ min: 8 }).withMessage("Password must be at least 8 characters"),
+    body("name").trim().isLength({ min: 2 }).withMessage("Name must be at least 2 characters"),
+    handleValidationErrors,
+    async (req, res) => {
+      try {
+        const { email, password, name } = req.body;
+        const existingUser = await UserModel.findOne({ email });
+        if (existingUser) return res.status(400).json({ error: "Email already registered" });
+
+        const user = new UserModel({ email, password, name });
+        await user.save();
+
+        const token = signToken(user._id, user.email);
+        res.status(201).json({
+          message: "Account created successfully",
+          token,
+          user: { id: user._id, email: user.email, name: user.name }
+        });
+      } catch (err) {
+        console.error("Signup error:", err);
+        res.status(500).json({ error: "Registration failed" });
+      }
+    }
+  );
+
+  app.post(
+    "/api/auth/signin",
+    authLimiter,
+    body("email").isEmail().normalizeEmail(),
+    body("password").notEmpty().withMessage("Password is required"),
+    handleValidationErrors,
+    async (req, res) => {
+      try {
+        const { email, password } = req.body;
+        const user = await UserModel.findOne({ email });
+        if (!user || !(await user.comparePassword(password))) {
+          return res.status(401).json({ error: "Invalid email or password" });
+        }
+
+        const token = signToken(user._id, user.email);
+        res.json({
+          message: "Signed in successfully",
+          token,
+          user: { id: user._id, email: user.email, name: user.name }
+        });
+      } catch (err) {
+        console.error("Signin error:", err);
+        res.status(500).json({ error: "Authentication failed" });
+      }
+    }
+  );
+
+  app.post(
+    "/api/auth/forgot-password",
+    forgotPasswordLimiter,
+    body("email").isEmail().normalizeEmail(),
+    handleValidationErrors,
+    async (req, res) => {
+      try {
+        const { email } = req.body;
+
+        const user = await UserModel.findOne({ email });
+        if (!user) {
+          // Don't reveal whether email exists (security best practice)
+          return res.status(200).json({ message: "If this email exists, a password reset link has been sent" });
+        }
+
+        // Generate a secure reset token (valid for 1 hour)
+        const resetToken = crypto.randomBytes(32).toString("hex");
+        const resetTokenExpiry = new Date(Date.now() + 3600000); // 1 hour
+
+        user.resetToken = resetToken;
+        user.resetTokenExpiry = resetTokenExpiry;
+        await user.save();
+
+        // Send password reset email
+        const emailSent = await sendPasswordResetEmail(user.email, resetToken, user.name);
+
+        if (emailSent) {
+          res.json({ message: "If this email exists, a password reset link has been sent" });
+        } else {
+          res.status(500).json({ error: "Failed to send email. Please try again later" });
+        }
+      } catch (err) {
+        console.error("Forgot password error:", err);
+        res.status(500).json({ error: "Failed to process password reset request" });
+      }
+    }
+  );
+
+  app.post(
+    "/api/auth/reset-password",
+    resetPasswordLimiter,
+    body("email").isEmail().normalizeEmail(),
+    body("resetToken").notEmpty().isLength({ min: 64 }).withMessage("Invalid reset token"),
+    body("newPassword").isLength({ min: 8 }).withMessage("Password must be at least 8 characters"),
+    handleValidationErrors,
+    async (req, res) => {
+      try {
+        const { email, resetToken, newPassword } = req.body;
+
+        const user = await UserModel.findOne({ email });
+        if (!user) {
+          return res.status(401).json({ error: "Invalid reset token" });
+        }
+
+        // Validate token and expiry
+        if (user.resetToken !== resetToken || !user.resetTokenExpiry || new Date() > user.resetTokenExpiry) {
+          return res.status(401).json({ error: "Invalid or expired reset token" });
+        }
+
+        user.password = newPassword;
+        user.resetToken = null;
+        user.resetTokenExpiry = null;
+        await user.save();
+
+        res.json({ message: "Password updated successfully. Please sign in with your new password." });
+      } catch (err) {
+        console.error("Reset password error:", err);
+        res.status(500).json({ error: "Password reset failed" });
+      }
+    }
+  );
+
+  // Protected route example
+  app.get("/api/auth/me", authLimiter, verifyToken, async (req, res) => {
+    try {
+      const user = await UserModel.findById(req.user.id).select("-password -resetToken -resetTokenExpiry").lean();
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      res.json({ user });
+    } catch (err) {
+      console.error("Get user error:", err);
+      res.status(500).json({ error: "Failed to fetch user" });
+    }
+  });
+
+  // In-memory "database" for gradual learning
+  const auditLogs = [];
+
+  // API logs endpoints
+  app.get("/api/logs", (req, res) => {
+    res.json(auditLogs);
+  });
+
+  app.post("/api/logs", (req, res) => {
+    const entry = req.body;
+    if (!entry || !entry.hash) {
+      return res.status(400).json({ error: "Invalid log entry" });
+    }
+    auditLogs.push(entry);
+    res.status(201).json(entry);
+  });
+
+  // API health endpoint
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok", timestamp: new Date(), environment: process.env.NODE_ENV });
+  });
+
+  // Security headers
+  app.use((req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("X-XSS-Protection", "1; mode=block");
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    next();
+  });
+
+  // Vite middleware for development (must come before 404 handler)
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+      define: {
+        'process.env.GEMINI_API_KEY': JSON.stringify(process.env.GEMINI_API_KEY || "")
+      }
+    });
+    app.use(vite.middlewares);
+    console.log("Vite development server connected to Express with injected environment");
+  } else {
+    // Serve static files in production
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
+  // 404 handler (after Vite middleware)
+  app.use((req, res) => {
+    res.status(404).json({ error: "Endpoint not found" });
+  });
+
+  // Global error handler
+  app.use((err, req, res, next) => {
+    console.error("Unhandled error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  });
+
+  httpServer.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT} (WebSocket enabled)`);
+  });
+}
+
+startServer().catch((err) => {
+  console.error("Failed to start server:", err);
+});
