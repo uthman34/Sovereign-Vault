@@ -1,10 +1,10 @@
 import * as React from "react";
-import { 
-  LayoutDashboard, 
-  Library, 
-  CloudUpload, 
-  ShieldCheck, 
-  Settings, 
+import {
+  LayoutDashboard,
+  Library,
+  CloudUpload,
+  ShieldCheck,
+  Settings,
   HelpCircle,
   Plus,
   Sparkles,
@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { Button } from "./ui/Button";
 
-export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose }) {
+export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose, databaseHealth }) {
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "library", label: "Library", icon: Library },
@@ -22,6 +22,15 @@ export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose })
     { id: "admin", label: "Admin", icon: ShieldCheck },
   ];
 
+  const databaseMode = databaseHealth?.mode || "Disconnected";
+  const databaseStatus = databaseHealth?.status || "disconnected";
+  const statusPalette = {
+    Remote: { background: "#dcfce7", color: "#166534" },
+    Memory: { background: "#fef3c7", color: "#92400e" },
+    Disconnected: { background: "#fee2e2", color: "#991b1b" },
+  };
+  const statusStyle = statusPalette[databaseMode] || statusPalette.Disconnected;
+
   return (
     <aside className={`sidebar d-flex flex-column ${isOpen ? "show" : ""}`}>
       <div className="d-flex align-items-center justify-content-between mb-4 px-2">
@@ -29,8 +38,8 @@ export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose })
           <h1 className="h5 fw-bold text-primary text-uppercase mb-0">Sovereign Archive</h1>
           <small className="text-muted text-uppercase fw-bold" style={{ fontSize: '10px', letterSpacing: '1px' }}>The Digital Vault</small>
         </div>
-        <button 
-          className="btn btn-link d-lg-none p-0 text-muted" 
+        <button
+          className="btn btn-link d-lg-none p-0 text-muted"
           onClick={onClose}
           aria-label="Close sidebar"
         >
@@ -38,8 +47,8 @@ export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose })
         </button>
       </div>
 
-      <Button 
-        className="mb-4 w-100 d-flex align-items-center justify-content-center gap-2" 
+      <Button
+        className="mb-4 w-100 d-flex align-items-center justify-content-center gap-2"
         onClick={() => onTabChange("upload")}
         aria-label="Create new document"
       >
@@ -54,11 +63,10 @@ export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose })
               <button
                 onClick={() => onTabChange(item.id)}
                 aria-current={currentTab === item.id ? "page" : undefined}
-                className={`nav-link w-100 text-start d-flex align-items-center gap-3 px-3 py-2 rounded-3 border-0 transition-all ${
-                  currentTab === item.id
+                className={`nav-link w-100 text-start d-flex align-items-center gap-3 px-3 py-2 rounded-3 border-0 transition-all ${currentTab === item.id
                     ? "bg-primary bg-opacity-10 text-primary fw-bold"
                     : "text-secondary hover-bg-light"
-                }`}
+                  }`}
                 style={{ background: 'transparent' }}
               >
                 <item.icon size={18} aria-hidden="true" />
@@ -70,14 +78,30 @@ export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose })
       </nav>
 
       <div className="mt-auto pt-3 border-top">
-        <button 
+        <div className="px-3 pb-3">
+          <div className="d-flex align-items-center justify-content-between mb-2">
+            <span className="text-uppercase text-muted fw-bold" style={{ fontSize: '10px', letterSpacing: '1px' }}>Database</span>
+            <span
+              className="badge rounded-pill px-2 py-1"
+              style={{ background: statusStyle.background, color: statusStyle.color, fontSize: '10px' }}
+            >
+              {databaseMode}
+            </span>
+          </div>
+          <p className="mb-0 text-muted" style={{ fontSize: '12px' }}>
+            {databaseStatus === "connected"
+              ? "Backend connection is available for uploads and file listings."
+              : "No live database connection detected right now."}
+          </p>
+        </div>
+        <button
           className="btn btn-link text-decoration-none text-secondary w-100 text-start d-flex align-items-center gap-3 px-3 py-2"
           aria-label="System Settings"
         >
           <Settings size={18} aria-hidden="true" />
           <span style={{ fontSize: '14px' }}>Settings</span>
         </button>
-        <button 
+        <button
           onClick={onSignOut}
           className="btn btn-link text-decoration-none text-danger w-100 text-start d-flex align-items-center gap-3 px-3 py-2"
           aria-label="Sign out of vault"
@@ -85,11 +109,11 @@ export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose })
           <LogOut size={18} aria-hidden="true" />
           <span style={{ fontSize: '14px' }}>Sign Out</span>
         </button>
-        
+
         <div className="d-flex align-items-center gap-3 px-3 py-3 mt-2">
-          <img 
-            alt="User Profile" 
-            className="rounded-circle bg-light" 
+          <img
+            alt="User Profile"
+            className="rounded-circle bg-light"
             style={{ width: '32px', height: '32px' }}
             src="https://picsum.photos/seed/admin/100/100"
             referrerPolicy="no-referrer"

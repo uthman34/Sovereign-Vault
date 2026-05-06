@@ -3,8 +3,10 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
+import fs from "fs";
 import mongoose from "mongoose";
 import UserModel from "./models/User.js";
+import FileAssetModel from "./models/FileAsset.js";
 import { Server } from "socket.io";
 import { createServer } from "http";
 import jwt from "jsonwebtoken";
@@ -13,29 +15,45 @@ import { initializeEmailService, sendPasswordResetEmail, verifyEmailService } fr
 import rateLimit from "express-rate-limit";
 import { body, validationResult } from "express-validator";
 import cors from "cors";
+import multer from "multer";
+import { MongoMemoryServer } from "mongodb-memory-server";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const uploadsDir = path.join(process.cwd(), "uploads");
+
+let mongoMemoryServer = null;
+const databaseHealth = {
+  mode: "Disconnected",
+  status: "disconnected",
+};
+
+fs.mkdirSync(uploadsDir, { recursive: true });
 
 // Connect to MongoDB
 const connectDB = async () => {
   try {
-    const uri = process.env.MONGODB_URI;
-
-    if (!uri) {
-      console.warn("MONGODB_URI is not defined. Using local fallback.");
-    } else if (uri.includes("<password>") || uri.includes("[password]")) {
-      throw new Error("MONGODB_URI contains placeholder credentials (<password> or [password]). Please update it in Settings.");
-    }
-
-    const connectionUri = uri || "mongodb://localhost:27017/sovereign_archive";
+    const uri = process.env.MONGODB_URI?.trim();
+    const hasRemoteUri = Boolean(uri)
+      && !uri.includes("<password>")
+      && !uri.includes("[password]")
+      && !uri.includes("replace_me")
+      && /^mongodb(\+srv)?:\/\//i.test(uri);
+    const connectionUri = hasRemoteUri
+      ? uri
+      : (mongoMemoryServer || (mongoMemoryServer = await MongoMemoryServer.create({ instance: { dbName: "sovereign_archive" } }))).getUri();
+    const connectionMode = hasRemoteUri ? "Remote" : "Memory";
 
     await mongoose.connect(connectionUri, {
       serverSelectionTimeoutMS: 5000, // Timeout after 5 seconds
     });
 
-    console.log("MongoDB connected successfully");
+    databaseHealth.mode = connectionMode;
+    databaseHealth.status = "connected";
+    console.log(`MongoDB connected successfully (${connectionMode})`);
   } catch (err) {
+    databaseHealth.mode = "Disconnected";
+    databaseHealth.status = "disconnected";
     if (err.message.includes("auth failed") || err.message.includes("bad auth")) {
       console.error("❌ MongoDB Auth Failed: Please check your username and password in the MONGODB_URI.");
       console.error("Ensure special characters in the password are URL-encoded (e.g., '@' as '%40').");
@@ -51,7 +69,7 @@ async function startServer() {
   initializeEmailService();
   await verifyEmailService();
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT || 3000);
 
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
@@ -78,6 +96,20 @@ async function startServer() {
 
   // Use JSON middleware for API routes (with size limit)
   app.use(express.json({ limit: "10kb" }));
+  const fileStorage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, uploadsDir),
+    filename: (req, file, cb) => {
+      const extension = path.extname(file.originalname) || ".bin";
+      cb(null, `${crypto.randomUUID()}${extension}`);
+    },
+  });
+
+  const upload = multer({
+    storage: fileStorage,
+    limits: {
+      fileSize: 500 * 1024 * 1024,
+    },
+  });
 
   // Rate limiters
   const authLimiter = rateLimit({
@@ -295,9 +327,131 @@ async function startServer() {
     res.status(201).json(entry);
   });
 
+  app.post("/api/upload", verifyToken, upload.single("file"), async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "Encrypted file is required" });
+      }
+
+      const originalName = (req.body.originalName || req.file.originalname || "encrypted-asset").toString();
+      const originalSize = Number(req.body.originalSize || req.file.size || 0);
+      const mimeType = (req.body.mimeType || "application/octet-stream").toString();
+
+      const storedAsset = await FileAssetModel.create({
+        userId: req.user.id,
+        originalName,
+        originalSize,
+        mimeType,
+        storedName: req.file.filename,
+        encryptedSize: req.file.size,
+        storagePath: req.file.path,
+        uploadDate: new Date(),
+      });
+
+      res.status(201).json({
+        message: "File uploaded successfully",
+        file: {
+          id: storedAsset._id,
+          originalName: storedAsset.originalName,
+          originalSize: storedAsset.originalSize,
+          mimeType: storedAsset.mimeType,
+          encryptedSize: storedAsset.encryptedSize,
+          uploadDate: storedAsset.uploadDate,
+          downloadUrl: `/api/files/${storedAsset._id}/download`,
+        },
+      });
+    } catch (err) {
+      console.error("Upload error:", err);
+      res.status(500).json({ error: "Failed to store encrypted file" });
+    }
+  });
+
+  app.get("/api/files", verifyToken, async (req, res) => {
+    try {
+      const files = await FileAssetModel.find({ userId: req.user.id }).sort({ uploadDate: -1 }).lean();
+      res.json({
+        files: files.map((file) => ({
+          id: file._id,
+          originalName: file.originalName,
+          originalSize: file.originalSize,
+          mimeType: file.mimeType,
+          encryptedSize: file.encryptedSize,
+          uploadDate: file.uploadDate,
+          downloadUrl: `/api/files/${file._id}/download`,
+        })),
+      });
+    } catch (err) {
+      console.error("Files lookup error:", err);
+      res.status(500).json({ error: "Failed to load uploaded files" });
+    }
+  });
+
+  app.get("/api/files/:id/download", verifyToken, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const file = await FileAssetModel.findById(id);
+
+      if (!file) {
+        return res.status(404).json({ error: "File not found" });
+      }
+
+      if (file.userId.toString() !== req.user.id) {
+        return res.status(403).json({ error: "Unauthorized to access this file" });
+      }
+
+      if (!fs.existsSync(file.storagePath)) {
+        return res.status(404).json({ error: "File is missing from disk" });
+      }
+
+      return res.download(file.storagePath, file.storedName);
+    } catch (err) {
+      console.error("Download error:", err);
+      res.status(500).json({ error: "Failed to download file" });
+    }
+  });
+
+  app.delete("/api/files/:id", verifyToken, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const file = await FileAssetModel.findById(id);
+
+      if (!file) {
+        return res.status(404).json({ error: "File not found" });
+      }
+
+      if (file.userId.toString() !== req.user.id) {
+        return res.status(403).json({ error: "Unauthorized to delete this file" });
+      }
+
+      try {
+        await fs.promises.unlink(file.storagePath);
+      } catch (unlinkError) {
+        if (unlinkError.code !== "ENOENT") {
+          throw unlinkError;
+        }
+      }
+
+      await FileAssetModel.findByIdAndDelete(id);
+
+      res.json({ message: "File deleted successfully" });
+    } catch (err) {
+      console.error("Delete error:", err);
+      res.status(500).json({ error: "Failed to delete file" });
+    }
+  });
+
   // API health endpoint
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", timestamp: new Date(), environment: process.env.NODE_ENV });
+    res.json({
+      status: "ok",
+      timestamp: new Date(),
+      environment: process.env.NODE_ENV,
+      database: {
+        mode: databaseHealth.mode,
+        status: databaseHealth.status,
+        readyState: mongoose.connection.readyState,
+      },
+    });
   });
 
   // Security headers
@@ -337,6 +491,9 @@ async function startServer() {
   // Global error handler
   app.use((err, req, res, next) => {
     console.error("Unhandled error:", err);
+    if (err instanceof multer.MulterError) {
+      return res.status(400).json({ error: err.message });
+    }
     res.status(500).json({ error: "Internal server error" });
   });
 

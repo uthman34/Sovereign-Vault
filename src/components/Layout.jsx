@@ -3,7 +3,7 @@ import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { motion, AnimatePresence } from "motion/react";
 
-export function Layout({ children, currentTab, onTabChange, onSignOut }) {
+export function Layout({ children, currentTab, onTabChange, onSignOut, databaseHealth }) {
   const [isSidebarOpen, setIsSidebarOpen] = React.useState(false);
 
   const toggleSidebar = () => setIsSidebarOpen(!isSidebarOpen);
@@ -14,15 +14,16 @@ export function Layout({ children, currentTab, onTabChange, onSignOut }) {
       {isSidebarOpen && (
         <div className="sidebar-overlay d-lg-none" onClick={closeSidebar}></div>
       )}
-      <Sidebar 
-        currentTab={currentTab} 
+      <Sidebar
+        currentTab={currentTab}
         onTabChange={(tab) => {
           onTabChange(tab);
           closeSidebar();
-        }} 
+        }}
         onSignOut={onSignOut}
         isOpen={isSidebarOpen}
         onClose={closeSidebar}
+        databaseHealth={databaseHealth}
       />
       <div className="main-content">
         <TopBar onTabChange={onTabChange} onMenuClick={toggleSidebar} />
