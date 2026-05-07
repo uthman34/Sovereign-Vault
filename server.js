@@ -16,19 +16,38 @@ import rateLimit from "express-rate-limit";
 import { body, validationResult } from "express-validator";
 import cors from "cors";
 import multer from "multer";
-import { MongoMemoryServer } from "mongodb-memory-server";
+import net from "net";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const uploadsDir = path.join(process.cwd(), "uploads");
 
-let mongoMemoryServer = null;
 const databaseHealth = {
   mode: "Disconnected",
   status: "disconnected",
 };
 
 fs.mkdirSync(uploadsDir, { recursive: true });
+
+const isPortAvailable = (port, host = "0.0.0.0") => {
+  return new Promise((resolve) => {
+    const tester = net.createServer();
+
+    tester.once("error", (err) => {
+      if (err.code === "EADDRINUSE") {
+        resolve(false);
+      } else {
+        resolve(false);
+      }
+    });
+
+    tester.once("listening", () => {
+      tester.close(() => resolve(true));
+    });
+
+    tester.listen(port, host);
+  });
+};
 
 // Connect to MongoDB
 const connectDB = async () => {
@@ -39,37 +58,44 @@ const connectDB = async () => {
       && !uri.includes("[password]")
       && !uri.includes("replace_me")
       && /^mongodb(\+srv)?:\/\//i.test(uri);
-    const connectionUri = hasRemoteUri
-      ? uri
-      : (mongoMemoryServer || (mongoMemoryServer = await MongoMemoryServer.create({ instance: { dbName: "sovereign_archive" } }))).getUri();
-    const connectionMode = hasRemoteUri ? "Remote" : "Memory";
 
-    await mongoose.connect(connectionUri, {
+    if (!hasRemoteUri) {
+      throw new Error("MONGODB_URI is missing or invalid. Provide a real MongoDB connection string in .env before starting the server.");
+    }
+
+    await mongoose.connect(uri, {
       serverSelectionTimeoutMS: 5000, // Timeout after 5 seconds
     });
 
-    databaseHealth.mode = connectionMode;
+    databaseHealth.mode = "Remote";
     databaseHealth.status = "connected";
-    console.log(`MongoDB connected successfully (${connectionMode})`);
+    console.log("MongoDB connected successfully (Remote)");
   } catch (err) {
     databaseHealth.mode = "Disconnected";
     databaseHealth.status = "disconnected";
     if (err.message.includes("auth failed") || err.message.includes("bad auth")) {
       console.error("❌ MongoDB Auth Failed: Please check your username and password in the MONGODB_URI.");
       console.error("Ensure special characters in the password are URL-encoded (e.g., '@' as '%40').");
+    } else if (err.message.includes("MONGODB_URI is missing or invalid")) {
+      console.error(`❌ ${err.message}`);
     } else {
       console.error("❌ MongoDB connection error:", err.message);
     }
-    console.log("⚠️ App will continue with limited functionality for development.");
+    throw new Error("MongoDB is unavailable. Server startup aborted.");
   }
 };
 
 async function startServer() {
+  const PORT = Number(process.env.PORT || 3000);
+
+  if (!(await isPortAvailable(PORT))) {
+    throw new Error(`Port ${PORT} is already in use. Stop the process using it or set PORT to a free port, then try again.`);
+  }
+
   await connectDB();
   initializeEmailService();
   await verifyEmailService();
   const app = express();
-  const PORT = Number(process.env.PORT || 3000);
 
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
@@ -310,6 +336,99 @@ async function startServer() {
     }
   });
 
+  // Recovery key endpoints
+  app.post("/api/auth/generate-recovery-key", verifyToken, async (req, res) => {
+    try {
+      const user = await UserModel.findById(req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Generate a secure random recovery key (12 words style, but hex for simplicity)
+      const recoveryKey = crypto.randomBytes(16).toString("hex").toUpperCase();
+      const hashedRecoveryKey = crypto.createHash("sha256").update(recoveryKey).digest("hex");
+
+      user.recoveryKey = hashedRecoveryKey;
+      user.recoveryKeyUsed = false;
+      user.recoveryKeyCreatedAt = new Date();
+      await user.save();
+
+      // Return unhashed key only once to user
+      res.json({
+        message: "Recovery key generated successfully",
+        recoveryKey: recoveryKey,
+        warning: "Save this key in a safe place. It will not be shown again."
+      });
+    } catch (err) {
+      console.error("Generate recovery key error:", err);
+      res.status(500).json({ error: "Failed to generate recovery key" });
+    }
+  });
+
+  app.get("/api/auth/recovery-key-status", verifyToken, async (req, res) => {
+    try {
+      const user = await UserModel.findById(req.user.id).select("recoveryKey recoveryKeyUsed recoveryKeyCreatedAt");
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      res.json({
+        hasRecoveryKey: !!user.recoveryKey,
+        isUsed: user.recoveryKeyUsed,
+        createdAt: user.recoveryKeyCreatedAt
+      });
+    } catch (err) {
+      console.error("Get recovery key status error:", err);
+      res.status(500).json({ error: "Failed to fetch recovery key status" });
+    }
+  });
+
+  app.post("/api/auth/use-recovery-key", async (req, res) => {
+    try {
+      const { email, recoveryKey } = req.body;
+
+      if (!email || !recoveryKey) {
+        return res.status(400).json({ error: "Email and recovery key are required" });
+      }
+
+      const user = await UserModel.findOne({ email });
+      if (!user) {
+        return res.status(401).json({ error: "Invalid email or recovery key" });
+      }
+
+      // Verify recovery key
+      const hashedInputKey = crypto.createHash("sha256").update(recoveryKey.trim()).digest("hex");
+      if (user.recoveryKey !== hashedInputKey) {
+        return res.status(401).json({ error: "Invalid email or recovery key" });
+      }
+
+      // Check if recovery key has already been used
+      if (user.recoveryKeyUsed) {
+        return res.status(401).json({ error: "Recovery key has already been used" });
+      }
+
+      // Mark recovery key as used
+      user.recoveryKeyUsed = true;
+      await user.save();
+
+      // Issue a special token that allows passphrase reset only
+      const resetToken = jwt.sign(
+        { id: user._id, email: user.email, recoveryMode: true },
+        process.env.JWT_SECRET || "default_secret",
+        { expiresIn: "1h" }
+      );
+
+      res.json({
+        message: "Recovery key validated successfully",
+        resetToken: resetToken,
+        note: "You can now set a new master passphrase for future uploads"
+      });
+    } catch (err) {
+      console.error("Use recovery key error:", err);
+      res.status(500).json({ error: "Failed to process recovery key" });
+    }
+  });
+
   // In-memory "database" for gradual learning
   const auditLogs = [];
 
@@ -500,8 +619,19 @@ async function startServer() {
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT} (WebSocket enabled)`);
   });
+
+  httpServer.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`❌ Port ${PORT} is already in use. Stop the existing process or change PORT, then restart.`);
+      process.exit(1);
+    }
+
+    console.error("HTTP server error:", err);
+    process.exit(1);
+  });
 }
 
 startServer().catch((err) => {
-  console.error("Failed to start server:", err);
+  console.error("Failed to start server:", err.message || err);
+  process.exit(1);
 });

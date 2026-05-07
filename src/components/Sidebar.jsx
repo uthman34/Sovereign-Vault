@@ -19,6 +19,7 @@ export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose, d
     { id: "library", label: "Library", icon: Library },
     { id: "upload", label: "Upload", icon: CloudUpload },
     { id: "ai", label: "AI Assistant", icon: Sparkles },
+    { id: "settings", label: "Settings", icon: Settings },
     { id: "admin", label: "Admin", icon: ShieldCheck },
   ];
 
@@ -94,13 +95,6 @@ export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose, d
               : "No live database connection detected right now."}
           </p>
         </div>
-        <button
-          className="btn btn-link text-decoration-none text-secondary w-100 text-start d-flex align-items-center gap-3 px-3 py-2"
-          aria-label="System Settings"
-        >
-          <Settings size={18} aria-hidden="true" />
-          <span style={{ fontSize: '14px' }}>Settings</span>
-        </button>
         <button
           onClick={onSignOut}
           className="btn btn-link text-decoration-none text-danger w-100 text-start d-flex align-items-center gap-3 px-3 py-2"

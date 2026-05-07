@@ -1,8 +1,9 @@
 import * as React from "react";
-import { CloudUpload, FileText, LockKeyhole, Trash2, Loader2, ShieldCheck, AlertCircle, CheckCircle2 } from "lucide-react";
+import { CloudUpload, FileText, LockKeyhole, Trash2, Loader2, ShieldCheck, AlertCircle, CheckCircle2, HelpCircle } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { Card, Badge, Input } from "../components/ui/Card";
 import { encryptFile } from "../lib/encryption";
+import { RecoveryModal } from "../components/RecoveryModal";
 
 function formatBytes(bytes) {
     if (!bytes) return "0 B";
@@ -20,6 +21,7 @@ export default function Upload() {
     const [isUploading, setIsUploading] = React.useState(false);
     const [statusMessage, setStatusMessage] = React.useState("");
     const [errorMessage, setErrorMessage] = React.useState("");
+    const [showRecoveryModal, setShowRecoveryModal] = React.useState(false);
 
     const addFiles = (incomingFiles) => {
         const nextFiles = incomingFiles.filter(Boolean);
@@ -126,21 +128,12 @@ export default function Upload() {
                     <Card className="upload-dropzone p-0 overflow-hidden border-0 shadow-sm">
                         <div
                             className={`upload-dropzone-surface ${isDragging ? "is-active" : ""}`}
-                            onClick={handleBrowse}
                             onDragOver={(event) => {
                                 event.preventDefault();
                                 setIsDragging(true);
                             }}
                             onDragLeave={() => setIsDragging(false)}
                             onDrop={handleDrop}
-                            role="button"
-                            tabIndex={0}
-                            onKeyDown={(event) => {
-                                if (event.key === "Enter" || event.key === " ") {
-                                    event.preventDefault();
-                                    handleBrowse();
-                                }
-                            }}
                         >
                             <input
                                 ref={fileInputRef}
@@ -167,7 +160,19 @@ export default function Upload() {
                                         onChange={(event) => setPassphrase(event.target.value)}
                                         placeholder="Enter your vault passphrase"
                                         autoComplete="current-password"
+                                        onClick={(e) => e.stopPropagation()}
+                                        onFocus={(e) => e.stopPropagation()}
+                                        onKeyDown={(e) => e.stopPropagation()}
                                     />
+                                    <button
+                                        type="button"
+                                        className="btn btn-link btn-sm text-muted mt-1 p-0"
+                                        onClick={() => setShowRecoveryModal(true)}
+                                        style={{ textDecoration: "none" }}
+                                    >
+                                        <HelpCircle size={14} className="me-1" style={{ display: "inline" }} />
+                                        Forgot passphrase?
+                                    </button>
                                 </div>
                                 <div className="col-12 col-md-5">
                                     <label className="form-label text-uppercase small fw-bold text-muted mb-2">Selected Files</label>
@@ -175,12 +180,21 @@ export default function Upload() {
                                         value={`${queuedFiles.length} file${queuedFiles.length === 1 ? "" : "s"} queued`}
                                         readOnly
                                         aria-label="Queued files summary"
+                                        onClick={(e) => e.stopPropagation()}
+                                        onFocus={(e) => e.stopPropagation()}
+                                        onKeyDown={(e) => e.stopPropagation()}
                                     />
                                 </div>
                             </div>
 
                             <div className="d-flex flex-wrap justify-content-center gap-3">
-                                <Button type="button" size="lg" className="px-4 d-inline-flex align-items-center gap-2" onClick={handleSubmit} disabled={isUploading}>
+                                <Button type="button" size="lg" className="px-4 d-inline-flex align-items-center gap-2" onClick={async () => {
+                                    if (!queuedFiles.length) {
+                                        fileInputRef.current?.click();
+                                        return;
+                                    }
+                                    await handleSubmit();
+                                }} disabled={isUploading}>
                                     {isUploading ? <Loader2 size={18} className="animate-spin" /> : <LockKeyhole size={18} />}
                                     {isUploading ? "Encrypting..." : "Encrypt and Upload"}
                                 </Button>
@@ -268,6 +282,12 @@ export default function Upload() {
                     </Card>
                 </div>
             </div>
+
+            <RecoveryModal
+                isOpen={showRecoveryModal}
+                onClose={() => setShowRecoveryModal(false)}
+                onRecoverySuccess={(newPassphrase) => setPassphrase(newPassphrase)}
+            />
         </div>
     );
 }

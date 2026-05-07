@@ -4,6 +4,7 @@ import Dashboard from "./pages/Dashboard";
 import AIAssistant from "./pages/AIAssistant";
 import Landing from "./pages/Landing";
 import Auth from "./pages/Auth";
+import Settings from "./pages/Settings";
 import { Card, Badge } from "./components/ui/Card";
 import { FileText, CheckCircle2, AlertCircle } from "lucide-react";
 import { AuditLedger } from "./lib/audit";
@@ -154,6 +155,7 @@ export default function App() {
       case "library": return <Library />;
       case "upload": return <Upload />;
       case "ai": return <AIAssistant />;
+      case "settings": return <Settings />;
       case "admin": return <Admin />;
       default: return <Dashboard />;
     }

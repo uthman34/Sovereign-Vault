@@ -30,6 +30,18 @@ const userSchema = new mongoose.Schema({
         type: Date,
         default: null,
     },
+    recoveryKey: {
+        type: String,
+        default: null,
+    },
+    recoveryKeyUsed: {
+        type: Boolean,
+        default: false,
+    },
+    recoveryKeyCreatedAt: {
+        type: Date,
+        default: null,
+    },
 });
 
 // Pre-save hook to hash password

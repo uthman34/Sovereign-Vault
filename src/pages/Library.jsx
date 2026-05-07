@@ -26,6 +26,9 @@ export default function Library() {
     const [errorMessage, setErrorMessage] = React.useState("");
     const [deletingId, setDeletingId] = React.useState(null);
     const [decryptingId, setDecryptingId] = React.useState(null);
+    const [showDecryptModal, setShowDecryptModal] = React.useState(false);
+    const [decryptTarget, setDecryptTarget] = React.useState(null);
+    const [decryptPassphrase, setDecryptPassphrase] = React.useState("");
 
     const loadFiles = React.useCallback(async () => {
         setIsLoading(true);
@@ -61,13 +64,21 @@ export default function Library() {
         loadFiles();
     }, [loadFiles]);
 
-    const handleDecrypt = async (file) => {
-        setDecryptingId(file.id);
+    const handleDecrypt = (file) => {
+        // Open modal to collect passphrase
+        setDecryptTarget(file);
+        setDecryptPassphrase("");
+        setShowDecryptModal(true);
+    };
+
+    const performDecrypt = async () => {
+        if (!decryptTarget) return;
+        setDecryptingId(decryptTarget.id);
+        setShowDecryptModal(false);
         try {
-            const passphrase = prompt("Enter the master passphrase to decrypt:");
+            const passphrase = decryptPassphrase;
             if (!passphrase) {
-                setDecryptingId(null);
-                return;
+                throw new Error("Passphrase is required");
             }
 
             const token = localStorage.getItem("sv_token");
@@ -75,7 +86,7 @@ export default function Library() {
                 throw new Error("Authentication required");
             }
 
-            const response = await fetch(file.downloadUrl, {
+            const response = await fetch(decryptTarget.downloadUrl, {
                 headers: {
                     Authorization: `Bearer ${token}`,
                 },
@@ -91,15 +102,18 @@ export default function Library() {
             const url = URL.createObjectURL(decryptedBlob);
             const a = document.createElement("a");
             a.href = url;
-            a.download = file.originalName;
+            a.download = decryptTarget.originalName;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
         } catch (error) {
+            // show error inside modal or as alert fallback
             alert(`Decryption failed: ${error.message}`);
         } finally {
             setDecryptingId(null);
+            setDecryptTarget(null);
+            setDecryptPassphrase("");
         }
     };
 
@@ -220,7 +234,7 @@ export default function Library() {
                                                         type="button"
                                                         size="sm"
                                                         className="d-inline-flex align-items-center gap-2"
-                                                        onClick={() => handleDecrypt(file)}
+                                                            onClick={() => handleDecrypt(file)}
                                                         disabled={decryptingId === file.id}
                                                     >
                                                         {decryptingId === file.id ? (
@@ -254,6 +268,26 @@ export default function Library() {
                     </Card>
                 </div>
             </div>
+                {showDecryptModal && (
+                    <div className="modal-backdrop" style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1050 }} onClick={() => setShowDecryptModal(false)}>
+                        <div className="modal-dialog" style={{ maxWidth: 520 }} onClick={(e) => e.stopPropagation()}>
+                            <div className="modal-content p-4">
+                                <h5 className="mb-3">Enter master passphrase</h5>
+                                <input
+                                    type="password"
+                                    className="form-control mb-3"
+                                    value={decryptPassphrase}
+                                    onChange={(e) => setDecryptPassphrase(e.target.value)}
+                                    placeholder="Master passphrase"
+                                />
+                                <div className="d-flex justify-content-end gap-2">
+                                    <Button type="button" variant="secondary" onClick={() => setShowDecryptModal(false)}>Cancel</Button>
+                                    <Button type="button" onClick={performDecrypt} disabled={decryptingId !== null}>{decryptingId ? "Decrypting..." : "Decrypt"}</Button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
         </div>
     );
 }
