@@ -121,23 +121,25 @@ export default function Upload() {
                         <p className="section-kicker mb-2">Secure Transfer</p>
                         <h2 className="display-6 fw-bold mb-2 tracking-tightest">Encrypt locally, then upload the sealed blob.</h2>
                         <p className="text-muted fw-medium mb-0">
-                            Files are transformed in the browser with AES-256 before they ever leave the device.
-                        </p>
-                    </div>
 
-                    <Card className="upload-dropzone p-0 overflow-hidden border-0 shadow-sm">
-                        <div
-                            className={`upload-dropzone-surface ${isDragging ? "is-active" : ""}`}
-                            onDragOver={(event) => {
-                                event.preventDefault();
                                 setIsDragging(true);
+                            // Convert encrypted blob to base64 for JSON transmission
+                            const arrayBuffer = await encryptedBlob.arrayBuffer();
+                            const uint8Array = new Uint8Array(arrayBuffer);
+                            const base64String = btoa(String.fromCharCode(...uint8Array));
                             }}
                             onDragLeave={() => setIsDragging(false)}
                             onDrop={handleDrop}
                         >
                             <input
+                                    "Content-Type": "application/json",
                                 ref={fileInputRef}
-                                type="file"
+                                body: JSON.stringify({
+                                    originalName: file.name,
+                                    originalSize: file.size,
+                                    mimeType: file.type || "application/octet-stream",
+                                    encryptedData: base64String,
+                                }),
                                 multiple
                                 className="d-none"
                                 onChange={(event) => addFiles(Array.from(event.target.files || []))}
@@ -288,6 +290,6 @@ export default function Upload() {
                 onClose={() => setShowRecoveryModal(false)}
                 onRecoverySuccess={(newPassphrase) => setPassphrase(newPassphrase)}
             />
-        </div>
+        </div >
     );
 }

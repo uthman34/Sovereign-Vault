@@ -1,0 +1,6 @@
+server.js
+node_modules
+.env
+.git
+.gitignore
+README.md
