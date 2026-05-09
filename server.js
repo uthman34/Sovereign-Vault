@@ -6,7 +6,8 @@ import { fileURLToPath } from "url";
 import fs from "fs";
 import mongoose from "mongoose";
 import UserModel from "./models/User.js";
-import FileAssetModel from "./models/FileAsset.js";
+import FilesModel from "./models/Files.js";
+import AuditModel from "./models/Audit.js";
 import { Server } from "socket.io";
 import { createServer } from "http";
 import jwt from "jsonwebtoken";
@@ -17,10 +18,13 @@ import { body, validationResult } from "express-validator";
 import cors from "cors";
 import multer from "multer";
 import net from "net";
+import { MongoMemoryServer } from "mongodb-memory-server";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const uploadsDir = path.join(process.cwd(), "uploads");
+
+let mongoMemoryServer = null;
 
 const databaseHealth = {
   mode: "Disconnected",
@@ -59,29 +63,27 @@ const connectDB = async () => {
       && !uri.includes("replace_me")
       && /^mongodb(\+srv)?:\/\//i.test(uri);
 
-    if (!hasRemoteUri) {
-      throw new Error("MONGODB_URI is missing or invalid. Provide a real MongoDB connection string in .env before starting the server.");
-    }
+    const connectionUri = hasRemoteUri
+      ? uri
+      : (mongoMemoryServer || (mongoMemoryServer = await MongoMemoryServer.create({ instance: { dbName: "sovereign_archive" } }))).getUri();
 
-    await mongoose.connect(uri, {
+    await mongoose.connect(connectionUri, {
       serverSelectionTimeoutMS: 5000, // Timeout after 5 seconds
     });
 
-    databaseHealth.mode = "Remote";
+    databaseHealth.mode = hasRemoteUri ? "Remote" : "Memory";
     databaseHealth.status = "connected";
-    console.log("MongoDB connected successfully (Remote)");
+    console.log(`MongoDB connected successfully (${databaseHealth.mode})`);
   } catch (err) {
     databaseHealth.mode = "Disconnected";
     databaseHealth.status = "disconnected";
     if (err.message.includes("auth failed") || err.message.includes("bad auth")) {
       console.error("❌ MongoDB Auth Failed: Please check your username and password in the MONGODB_URI.");
       console.error("Ensure special characters in the password are URL-encoded (e.g., '@' as '%40').");
-    } else if (err.message.includes("MONGODB_URI is missing or invalid")) {
-      console.error(`❌ ${err.message}`);
     } else {
       console.error("❌ MongoDB connection error:", err.message);
     }
-    throw new Error("MongoDB is unavailable. Server startup aborted.");
+    console.log("⚠️ App will continue with limited functionality for development.");
   }
 };
 
@@ -191,6 +193,21 @@ async function startServer() {
     } catch (err) {
       res.status(401).json({ error: "Invalid token" });
     }
+  };
+
+  const buildAuditEntry = async ({ userId = null, action, details }) => {
+    const lastEntry = await AuditModel.findOne().sort({ timestamp: -1, _id: -1 }).lean();
+    const previousHash = lastEntry?.hash || "0000000000000000";
+    const timestamp = new Date();
+    const payload = {
+      userId: userId ? String(userId) : null,
+      action,
+      details,
+      timestamp: timestamp.toISOString(),
+      previousHash,
+    };
+    const hash = crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+    return AuditModel.create({ ...payload, hash, timestamp });
   };
 
   // --- Authentication API ---
@@ -429,21 +446,51 @@ async function startServer() {
     }
   });
 
-  // In-memory "database" for gradual learning
-  const auditLogs = [];
-
   // API logs endpoints
-  app.get("/api/logs", (req, res) => {
-    res.json(auditLogs);
+  app.get("/api/logs", async (req, res) => {
+    try {
+      const logs = await AuditModel.find().sort({ timestamp: 1, _id: 1 }).lean();
+      res.json(logs);
+    } catch (err) {
+      console.error("Logs lookup error:", err);
+      res.status(500).json({ error: "Failed to load audit logs" });
+    }
   });
 
-  app.post("/api/logs", (req, res) => {
-    const entry = req.body;
-    if (!entry || !entry.hash) {
-      return res.status(400).json({ error: "Invalid log entry" });
+  app.post("/api/logs", async (req, res) => {
+    try {
+      const { action, details, previousHash, hash, timestamp, userId } = req.body || {};
+
+      if (!action || !details) {
+        return res.status(400).json({ error: "Invalid log entry" });
+      }
+
+      const lastEntry = await AuditModel.findOne().sort({ timestamp: -1, _id: -1 }).lean();
+      const resolvedPreviousHash = previousHash || lastEntry?.hash || "0000000000000000";
+      const resolvedTimestamp = timestamp ? new Date(timestamp) : new Date();
+      const payload = {
+        userId: userId || null,
+        action,
+        details,
+        timestamp: resolvedTimestamp.toISOString(),
+        previousHash: resolvedPreviousHash,
+      };
+      const resolvedHash = hash || crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+
+      const entry = await AuditModel.create({
+        userId: userId || null,
+        action,
+        details,
+        timestamp: resolvedTimestamp,
+        previousHash: resolvedPreviousHash,
+        hash: resolvedHash,
+      });
+
+      res.status(201).json(entry);
+    } catch (err) {
+      console.error("Save log error:", err);
+      res.status(500).json({ error: "Failed to save audit log" });
     }
-    auditLogs.push(entry);
-    res.status(201).json(entry);
   });
 
   app.post("/api/upload", verifyToken, upload.single("file"), async (req, res) => {
@@ -456,26 +503,36 @@ async function startServer() {
       const originalSize = Number(req.body.originalSize || req.file.size || 0);
       const mimeType = (req.body.mimeType || "application/octet-stream").toString();
 
-      const storedAsset = await FileAssetModel.create({
+      const storedAsset = await FilesModel.create({
         userId: req.user.id,
-        originalName,
-        originalSize,
-        mimeType,
+        name: originalName,
+        size: originalSize,
+        type: mimeType,
+        date: new Date(),
         storedName: req.file.filename,
         encryptedSize: req.file.size,
         storagePath: req.file.path,
-        uploadDate: new Date(),
+      });
+
+      await buildAuditEntry({
+        userId: req.user.id,
+        action: "FILE_UPLOAD",
+        details: `Uploaded ${originalName}`,
       });
 
       res.status(201).json({
         message: "File uploaded successfully",
         file: {
           id: storedAsset._id,
-          originalName: storedAsset.originalName,
-          originalSize: storedAsset.originalSize,
-          mimeType: storedAsset.mimeType,
+          name: storedAsset.name,
+          size: storedAsset.size,
+          type: storedAsset.type,
+          date: storedAsset.date,
+          originalName: storedAsset.name,
+          originalSize: storedAsset.size,
+          mimeType: storedAsset.type,
           encryptedSize: storedAsset.encryptedSize,
-          uploadDate: storedAsset.uploadDate,
+          uploadDate: storedAsset.date,
           downloadUrl: `/api/files/${storedAsset._id}/download`,
         },
       });
@@ -487,15 +544,19 @@ async function startServer() {
 
   app.get("/api/files", verifyToken, async (req, res) => {
     try {
-      const files = await FileAssetModel.find({ userId: req.user.id }).sort({ uploadDate: -1 }).lean();
+      const files = await FilesModel.find({ userId: req.user.id }).sort({ date: -1 }).lean();
       res.json({
         files: files.map((file) => ({
           id: file._id,
-          originalName: file.originalName,
-          originalSize: file.originalSize,
-          mimeType: file.mimeType,
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          date: file.date,
+          originalName: file.name,
+          originalSize: file.size,
+          mimeType: file.type,
           encryptedSize: file.encryptedSize,
-          uploadDate: file.uploadDate,
+          uploadDate: file.date,
           downloadUrl: `/api/files/${file._id}/download`,
         })),
       });
@@ -508,7 +569,7 @@ async function startServer() {
   app.get("/api/files/:id/download", verifyToken, async (req, res) => {
     try {
       const { id } = req.params;
-      const file = await FileAssetModel.findById(id);
+      const file = await FilesModel.findById(id);
 
       if (!file) {
         return res.status(404).json({ error: "File not found" });
@@ -522,6 +583,12 @@ async function startServer() {
         return res.status(404).json({ error: "File is missing from disk" });
       }
 
+      await buildAuditEntry({
+        userId: req.user.id,
+        action: "FILE_DOWNLOAD",
+        details: `Downloaded ${file.name}`,
+      });
+
       return res.download(file.storagePath, file.storedName);
     } catch (err) {
       console.error("Download error:", err);
@@ -532,7 +599,7 @@ async function startServer() {
   app.delete("/api/files/:id", verifyToken, async (req, res) => {
     try {
       const { id } = req.params;
-      const file = await FileAssetModel.findById(id);
+      const file = await FilesModel.findById(id);
 
       if (!file) {
         return res.status(404).json({ error: "File not found" });
@@ -550,7 +617,13 @@ async function startServer() {
         }
       }
 
-      await FileAssetModel.findByIdAndDelete(id);
+      await FilesModel.findByIdAndDelete(id);
+
+      await buildAuditEntry({
+        userId: req.user.id,
+        action: "FILE_DELETE",
+        details: `Deleted ${file.name}`,
+      });
 
       res.json({ message: "File deleted successfully" });
     } catch (err) {
