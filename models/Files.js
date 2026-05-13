@@ -35,6 +35,26 @@ const filesSchema = new mongoose.Schema({
         required: true,
         min: 0,
     },
+    storageProvider: {
+        type: String,
+        enum: ["local", "cloudinary"],
+        default: "local",
+    },
+    cloudinaryPublicId: {
+        type: String,
+        required: false,
+        trim: true,
+    },
+    cloudinarySecureUrl: {
+        type: String,
+        required: false,
+        trim: true,
+    },
+    cloudinaryResourceType: {
+        type: String,
+        required: false,
+        trim: true,
+    },
     storagePath: {
         type: String,
         required: false,

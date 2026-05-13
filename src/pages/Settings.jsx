@@ -13,6 +13,10 @@ export default function Settings() {
     const [recoveryKey, setRecoveryKey] = React.useState("");
     const [isGeneratingRecoveryKey, setIsGeneratingRecoveryKey] = React.useState(false);
     const [recoveryKeyStatus, setRecoveryKeyStatus] = React.useState(null);
+    const [profile, setProfile] = React.useState(null);
+    const [displayName, setDisplayName] = React.useState("");
+    const [avatarFile, setAvatarFile] = React.useState(null);
+    const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
 
     React.useEffect(() => {
         // Fetch recovery key status on mount
@@ -22,15 +26,37 @@ export default function Settings() {
                 const response = await fetch("/api/auth/recovery-key-status", {
                     headers: { Authorization: `Bearer ${token}` }
                 });
-                if (response.ok) {
-                    const data = await response.json();
-                    setRecoveryKeyStatus(data);
+                let data = null;
+                try {
+                    data = await response.json();
+                } catch (e) {
+                    data = null;
                 }
+                if (response.ok && data) setRecoveryKeyStatus(data);
             } catch (err) {
                 console.error("Failed to fetch recovery key status:", err);
             }
         };
         fetchRecoveryKeyStatus();
+        // fetch profile
+        (async () => {
+            try {
+                const token = localStorage.getItem("sv_token");
+                if (!token) return;
+                const r = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } });
+                let d = null;
+                try { d = await r.json(); } catch (e) { d = null; }
+                if (!r.ok) {
+                    const txt = await r.text().catch(() => '');
+                    console.warn('/api/auth/me failed', r.status, txt);
+                    return;
+                }
+                setProfile(d?.user || null);
+                setDisplayName(d?.user?.name || "");
+            } catch (e) {
+                console.error('Failed to load profile', e);
+            }
+        })();
     }, []);
 
     const handleGenerateRecoveryKey = async () => {
@@ -93,7 +119,7 @@ export default function Settings() {
         // Store the new passphrase in localStorage or session
         // Note: This is client-side only. The passphrase is never sent to the server.
         localStorage.setItem("sv_master_passphrase_hint", new Date().toISOString());
-        
+
         setMessageType("success");
         setMessage("Passphrase updated successfully. You can now use the new passphrase for future uploads.");
         setNewPassphrase("");
@@ -105,6 +131,56 @@ export default function Settings() {
             setMessage("");
             setMessageType("");
         }, 3000);
+    };
+
+    const handleSaveProfile = async () => {
+        try {
+            const token = localStorage.getItem('sv_token');
+            const res = await fetch('/api/auth/me', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                body: JSON.stringify({ name: displayName })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Failed to update profile');
+            setProfile(data.user || profile);
+            setMessage('Profile updated');
+            setMessageType('success');
+        } catch (err) {
+            setMessage(err.message || 'Failed to update profile');
+            setMessageType('error');
+        }
+    };
+
+    const handleAvatarChange = (e) => {
+        const f = e.target.files?.[0] || null;
+        setAvatarFile(f);
+    };
+
+    const handleUploadAvatar = async () => {
+        if (!avatarFile) return;
+        setIsUploadingAvatar(true);
+        try {
+            const token = localStorage.getItem('sv_token');
+            const fd = new FormData();
+            fd.append('avatar', avatarFile, avatarFile.name);
+            const res = await fetch('/api/auth/me/avatar', {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}` },
+                body: fd
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Avatar upload failed');
+            setProfile((p) => ({ ...(p || {}), avatarUrl: data.avatarUrl }));
+            setAvatarFile(null);
+            setMessage('Avatar uploaded');
+            setMessageType('success');
+        } catch (err) {
+            setMessage(err.message || 'Avatar upload failed');
+            setMessageType('error');
+        } finally {
+            setIsUploadingAvatar(false);
+        }
     };
 
     return (
@@ -336,6 +412,28 @@ export default function Settings() {
                                 <span className="small text-muted">Transport Security</span>
                                 <Badge variant="success">JWT Auth</Badge>
                             </div>
+                        </div>
+                    </Card>
+                    <Card className="shadow-sm mt-4">
+                        <h5 className="h6 fw-bold mb-3">Profile</h5>
+                        <div className="mb-3">
+                            <label className="form-label small fw-bold text-muted">Display name</label>
+                            <input className="form-control" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Your display name" />
+                        </div>
+                        <div className="mb-3">
+                            <label className="form-label small fw-bold text-muted">Avatar</label>
+                            <div className="d-flex gap-2 align-items-center">
+                                <input type="file" accept="image/*" onChange={handleAvatarChange} />
+                                <button className="btn btn-primary" onClick={handleUploadAvatar} disabled={!avatarFile || isUploadingAvatar}>{isUploadingAvatar ? 'Uploading...' : 'Upload'}</button>
+                            </div>
+                            {profile?.avatarUrl && (
+                                <div className="mt-3">
+                                    <img src={profile.avatarUrl} alt="avatar" style={{ width: 72, height: 72, borderRadius: 8 }} />
+                                </div>
+                            )}
+                        </div>
+                        <div className="d-flex gap-2">
+                            <button className="btn btn-primary" onClick={handleSaveProfile}>Save</button>
                         </div>
                     </Card>
                 </div>

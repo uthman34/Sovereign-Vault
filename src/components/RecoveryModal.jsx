@@ -24,9 +24,16 @@ export function RecoveryModal({ isOpen, onClose, onRecoverySuccess }) {
                 body: JSON.stringify({ email, recoveryKey })
             });
 
-            const data = await response.json();
+            let data = {};
+            try {
+                data = await response.json();
+            } catch (parseErr) {
+                // Empty or invalid JSON body
+                data = {};
+            }
+
             if (!response.ok) {
-                throw new Error(data.error || "Invalid recovery key");
+                throw new Error(data.error || `Invalid recovery key (status ${response.status})`);
             }
 
             setResetToken(data.resetToken);
@@ -53,7 +60,7 @@ export function RecoveryModal({ isOpen, onClose, onRecoverySuccess }) {
 
         // Store the new passphrase locally (client-side only)
         localStorage.setItem("sv_master_passphrase_recovery", newPassphrase);
-        
+
         setStep("success");
         setTimeout(() => {
             onRecoverySuccess?.(newPassphrase);

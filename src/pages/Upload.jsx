@@ -121,31 +121,45 @@ export default function Upload() {
                         <p className="section-kicker mb-2">Secure Transfer</p>
                         <h2 className="display-6 fw-bold mb-2 tracking-tightest">Encrypt locally, then upload the sealed blob.</h2>
                         <p className="text-muted fw-medium mb-0">
+                            Your files are encrypted in the browser before they leave your device.
+                        </p>
+                    </div>
 
-                                setIsDragging(true);
-                            // Convert encrypted blob to base64 for JSON transmission
-                            const arrayBuffer = await encryptedBlob.arrayBuffer();
-                            const uint8Array = new Uint8Array(arrayBuffer);
-                            const base64String = btoa(String.fromCharCode(...uint8Array));
-                            }}
-                            onDragLeave={() => setIsDragging(false)}
-                            onDrop={handleDrop}
-                        >
+                    <Card
+                        className={`p-0 shadow-sm overflow-hidden upload-dropzone ${isDragging ? "is-dragging" : ""}`}
+                        onDragEnter={(event) => {
+                            event.preventDefault();
+                            setIsDragging(true);
+                        }}
+                        onDragOver={(event) => {
+                            event.preventDefault();
+                            setIsDragging(true);
+                        }}
+                        onDragLeave={(event) => {
+                            event.preventDefault();
+                            setIsDragging(false);
+                        }}
+                        onDrop={handleDrop}
+                        role="button"
+                        tabIndex={0}
+                        onClick={handleBrowse}
+                        onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                handleBrowse();
+                            }
+                        }}
+                    >
+                        <div className="card-body text-center py-5 px-4">
                             <input
-                                    "Content-Type": "application/json",
                                 ref={fileInputRef}
-                                body: JSON.stringify({
-                                    originalName: file.name,
-                                    originalSize: file.size,
-                                    mimeType: file.type || "application/octet-stream",
-                                    encryptedData: base64String,
-                                }),
+                                type="file"
                                 multiple
                                 className="d-none"
                                 onChange={(event) => addFiles(Array.from(event.target.files || []))}
                             />
 
-                            <div className="upload-icon-shell mb-4">
+                            <div className="upload-icon-shell mb-4 mx-auto">
                                 <CloudUpload size={36} />
                             </div>
                             <h3 className="h3 fw-bold mb-2">Drop files here or browse</h3>
@@ -153,7 +167,7 @@ export default function Upload() {
                                 PDF, DOCX, XLSX, ZIP, images, and more. The selected files are encrypted on the client with your master passphrase.
                             </p>
 
-                            <div className="row g-3 justify-content-center mb-4">
+                            <div className="row g-3 justify-content-center mb-4 text-start">
                                 <div className="col-12 col-md-5">
                                     <label className="form-label text-uppercase small fw-bold text-muted mb-2">Master Passphrase</label>
                                     <Input
@@ -190,13 +204,19 @@ export default function Upload() {
                             </div>
 
                             <div className="d-flex flex-wrap justify-content-center gap-3">
-                                <Button type="button" size="lg" className="px-4 d-inline-flex align-items-center gap-2" onClick={async () => {
-                                    if (!queuedFiles.length) {
-                                        fileInputRef.current?.click();
-                                        return;
-                                    }
-                                    await handleSubmit();
-                                }} disabled={isUploading}>
+                                <Button
+                                    type="button"
+                                    size="lg"
+                                    className="px-4 d-inline-flex align-items-center gap-2"
+                                    onClick={async () => {
+                                        if (!queuedFiles.length) {
+                                            fileInputRef.current?.click();
+                                            return;
+                                        }
+                                        await handleSubmit();
+                                    }}
+                                    disabled={isUploading}
+                                >
                                     {isUploading ? <Loader2 size={18} className="animate-spin" /> : <LockKeyhole size={18} />}
                                     {isUploading ? "Encrypting..." : "Encrypt and Upload"}
                                 </Button>
@@ -290,6 +310,6 @@ export default function Upload() {
                 onClose={() => setShowRecoveryModal(false)}
                 onRecoverySuccess={(newPassphrase) => setPassphrase(newPassphrase)}
             />
-        </div >
+        </div>
     );
 }

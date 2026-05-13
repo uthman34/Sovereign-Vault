@@ -17,12 +17,33 @@ import rateLimit from "express-rate-limit";
 import { body, validationResult } from "express-validator";
 import cors from "cors";
 import multer from "multer";
+import { v2 as cloudinary } from "cloudinary";
+import { Readable } from "stream";
 import net from "net";
 import { MongoMemoryServer } from "mongodb-memory-server";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const uploadsDir = path.join(process.cwd(), "uploads");
+
+const cloudinaryCloudName = process.env.CLOUDINARY_CLOUD_NAME?.trim();
+const cloudinaryApiKey = process.env.CLOUDINARY_API_KEY?.trim();
+const cloudinaryApiSecret = process.env.CLOUDINARY_API_SECRET?.trim();
+const cloudinaryFolder = process.env.CLOUDINARY_FOLDER?.trim() || "sovereign-vault";
+const cloudinaryConfigured = Boolean(cloudinaryCloudName && cloudinaryApiKey && cloudinaryApiSecret);
+
+if (cloudinaryConfigured) {
+  cloudinary.config({
+    cloud_name: cloudinaryCloudName,
+    api_key: cloudinaryApiKey,
+    api_secret: cloudinaryApiSecret,
+    secure: true,
+  });
+
+  if (cloudinaryApiKey === cloudinaryApiSecret) {
+    console.warn("Cloudinary appears misconfigured: CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET are identical.");
+  }
+}
 
 let mongoMemoryServer = null;
 
@@ -124,13 +145,19 @@ async function startServer() {
 
   // Use JSON middleware for API routes (with size limit)
   app.use(express.json({ limit: "10kb" }));
-  const fileStorage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadsDir),
-    filename: (req, file, cb) => {
-      const extension = path.extname(file.originalname) || ".bin";
-      cb(null, `${crypto.randomUUID()}${extension}`);
-    },
-  });
+
+  // Serve uploads folder so locally-stored avatars can be displayed
+  app.use('/uploads', express.static(uploadsDir));
+
+  const fileStorage = cloudinaryConfigured
+    ? multer.memoryStorage()
+    : multer.diskStorage({
+      destination: (req, file, cb) => cb(null, uploadsDir),
+      filename: (req, file, cb) => {
+        const extension = path.extname(file.originalname) || ".bin";
+        cb(null, `${crypto.randomUUID()}${extension}`);
+      },
+    });
 
   const upload = multer({
     storage: fileStorage,
@@ -138,6 +165,30 @@ async function startServer() {
       fileSize: 500 * 1024 * 1024,
     },
   });
+
+  const uploadBufferToCloudinary = (buffer, options = {}) => {
+    return new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(options, (error, result) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve(result);
+      });
+
+      Readable.from(buffer).pipe(uploadStream);
+    });
+  };
+
+  const isCloudinaryAuthError = (error) => {
+    const message = `${error?.message || ""}`.toLowerCase();
+    return error?.http_code === 401
+      || message.includes("invalid signature")
+      || message.includes("unknown api key")
+      || message.includes("authorization required")
+      || message.includes("api secret");
+  };
 
   // Rate limiters
   const authLimiter = rateLimit({
@@ -353,6 +404,77 @@ async function startServer() {
     }
   });
 
+  // Update basic profile (name/displayName)
+  app.put("/api/auth/me", verifyToken, async (req, res) => {
+    try {
+      const { name } = req.body || {};
+      const user = await UserModel.findById(req.user.id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      if (typeof name === 'string' && name.trim().length > 0) user.name = name.trim();
+      await user.save();
+
+      await buildAuditEntry({ userId: req.user.id, action: 'PROFILE_UPDATE', details: 'Updated profile' });
+
+      res.json({ message: 'Profile updated', user: { id: user._id, email: user.email, name: user.name, avatarUrl: user.avatarUrl } });
+    } catch (err) {
+      console.error('Update profile error:', err);
+      res.status(500).json({ error: 'Failed to update profile' });
+    }
+  });
+
+  // Upload or replace avatar
+  app.post('/api/auth/me/avatar', verifyToken, upload.single('avatar'), async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'Avatar file is required' });
+      const user = await UserModel.findById(req.user.id);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+
+      // If previously stored in Cloudinary, remove old avatar
+      if (user.avatarPublicId && cloudinaryConfigured) {
+        try {
+          await cloudinary.uploader.destroy(user.avatarPublicId, { resource_type: user.avatarResourceType || 'image', invalidate: true });
+        } catch (destroyErr) {
+          console.warn('Failed to destroy previous avatar on Cloudinary:', destroyErr?.message || destroyErr);
+        }
+      }
+
+      if (cloudinaryConfigured && req.file.buffer) {
+        const publicId = `${cloudinaryFolder}/avatars/${req.user.id}-${Date.now()}-${crypto.randomUUID()}`;
+        const uploadResult = await uploadBufferToCloudinary(req.file.buffer, {
+          resource_type: 'image',
+          folder: `${cloudinaryFolder}/avatars`,
+          public_id: `${req.user.id}-${Date.now()}-${crypto.randomUUID()}`,
+          overwrite: true,
+        });
+
+        user.avatarUrl = uploadResult.secure_url || null;
+        user.avatarPublicId = uploadResult.public_id || null;
+        user.avatarResourceType = uploadResult.resource_type || 'image';
+      } else if (req.file.path) {
+        // Fallback to disk storage: set public URL to /uploads/<filename>
+        const filename = req.file.filename || path.basename(req.file.path);
+        user.avatarUrl = `/uploads/${filename}`;
+        user.avatarPublicId = null;
+        user.avatarResourceType = 'image';
+      } else {
+        return res.status(500).json({ error: 'Failed to store avatar' });
+      }
+
+      await user.save();
+
+      await buildAuditEntry({ userId: req.user.id, action: 'AVATAR_UPLOAD', details: 'Updated avatar' });
+
+      res.json({ message: 'Avatar uploaded', avatarUrl: user.avatarUrl });
+    } catch (err) {
+      console.error('Avatar upload error:', err);
+      if (isCloudinaryAuthError(err)) {
+        return res.status(502).json({ error: 'Cloudinary credentials are invalid. Check CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.' });
+      }
+      res.status(500).json({ error: 'Failed to upload avatar' });
+    }
+  });
+
   // Recovery key endpoints
   app.post("/api/auth/generate-recovery-key", verifyToken, async (req, res) => {
     try {
@@ -502,6 +624,34 @@ async function startServer() {
       const originalName = (req.body.originalName || req.file.originalname || "encrypted-asset").toString();
       const originalSize = Number(req.body.originalSize || req.file.size || 0);
       const mimeType = (req.body.mimeType || "application/octet-stream").toString();
+      const encryptedSize = Number(req.file.size || req.body.originalSize || 0);
+
+      let storedAssetData = {
+        storageProvider: "local",
+        storagePath: req.file.path,
+        storedName: req.file.filename,
+        encryptedSize,
+      };
+
+      if (cloudinaryConfigured) {
+        const publicId = `${req.user.id}/${Date.now()}-${crypto.randomUUID()}`;
+        const uploadResult = await uploadBufferToCloudinary(req.file.buffer, {
+          resource_type: "raw",
+          folder: cloudinaryFolder,
+          public_id: publicId,
+          overwrite: true,
+        });
+
+        storedAssetData = {
+          storageProvider: "cloudinary",
+          storagePath: null,
+          storedName: originalName,
+          encryptedSize: Number(uploadResult.bytes || encryptedSize),
+          cloudinaryPublicId: uploadResult.public_id,
+          cloudinarySecureUrl: uploadResult.secure_url,
+          cloudinaryResourceType: uploadResult.resource_type || "raw",
+        };
+      }
 
       const storedAsset = await FilesModel.create({
         userId: req.user.id,
@@ -509,9 +659,7 @@ async function startServer() {
         size: originalSize,
         type: mimeType,
         date: new Date(),
-        storedName: req.file.filename,
-        encryptedSize: req.file.size,
-        storagePath: req.file.path,
+        ...storedAssetData,
       });
 
       await buildAuditEntry({
@@ -538,6 +686,13 @@ async function startServer() {
       });
     } catch (err) {
       console.error("Upload error:", err);
+
+      if (isCloudinaryAuthError(err)) {
+        return res.status(502).json({
+          error: "Cloudinary credentials are invalid. Check CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.",
+        });
+      }
+
       res.status(500).json({ error: "Failed to store encrypted file" });
     }
   });
@@ -579,15 +734,35 @@ async function startServer() {
         return res.status(403).json({ error: "Unauthorized to access this file" });
       }
 
-      if (!fs.existsSync(file.storagePath)) {
-        return res.status(404).json({ error: "File is missing from disk" });
-      }
-
       await buildAuditEntry({
         userId: req.user.id,
         action: "FILE_DOWNLOAD",
         details: `Downloaded ${file.name}`,
       });
+
+      if (file.storageProvider === "cloudinary" && file.cloudinarySecureUrl) {
+        const upstream = await fetch(file.cloudinarySecureUrl);
+
+        if (!upstream.ok || !upstream.body) {
+          return res.status(502).json({ error: "Unable to fetch file from Cloudinary" });
+        }
+
+        const downloadName = path.basename(file.storedName || file.name || "download.bin");
+        res.setHeader("Content-Type", file.type || upstream.headers.get("content-type") || "application/octet-stream");
+        res.setHeader("Content-Disposition", `attachment; filename="${downloadName.replace(/\"/g, "")}"`);
+
+        const contentLength = upstream.headers.get("content-length");
+        if (contentLength) {
+          res.setHeader("Content-Length", contentLength);
+        }
+
+        Readable.fromWeb(upstream.body).pipe(res);
+        return;
+      }
+
+      if (!file.storagePath || !fs.existsSync(file.storagePath)) {
+        return res.status(404).json({ error: "File is missing from disk" });
+      }
 
       return res.download(file.storagePath, file.storedName);
     } catch (err) {
@@ -609,11 +784,18 @@ async function startServer() {
         return res.status(403).json({ error: "Unauthorized to delete this file" });
       }
 
-      try {
-        await fs.promises.unlink(file.storagePath);
-      } catch (unlinkError) {
-        if (unlinkError.code !== "ENOENT") {
-          throw unlinkError;
+      if (file.storageProvider === "cloudinary" && file.cloudinaryPublicId) {
+        await cloudinary.uploader.destroy(file.cloudinaryPublicId, {
+          resource_type: file.cloudinaryResourceType || "raw",
+          invalidate: true,
+        });
+      } else if (file.storagePath) {
+        try {
+          await fs.promises.unlink(file.storagePath);
+        } catch (unlinkError) {
+          if (unlinkError.code !== "ENOENT") {
+            throw unlinkError;
+          }
         }
       }
 

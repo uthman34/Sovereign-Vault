@@ -14,6 +14,37 @@ import {
 import { Button } from "./ui/Button";
 
 export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose, databaseHealth }) {
+  const [profile, setProfile] = React.useState(null);
+
+  React.useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const token = localStorage.getItem('sv_token');
+        if (!token) return;
+        const res = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } });
+        let data = null;
+        try {
+          data = await res.json();
+        } catch (e) {
+          // non-JSON or empty response
+          const text = await res.text().catch(() => '');
+          console.warn('Non-JSON /api/auth/me response:', res.status, text);
+          data = null;
+        }
+
+        if (!res.ok) {
+          console.warn('/api/auth/me returned', res.status, data);
+          return;
+        }
+
+        if (mounted) setProfile(data?.user || null);
+      } catch (err) {
+        console.error('Failed to fetch profile:', err);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "library", label: "Library", icon: Library },
@@ -65,8 +96,8 @@ export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose, d
                 onClick={() => onTabChange(item.id)}
                 aria-current={currentTab === item.id ? "page" : undefined}
                 className={`nav-link w-100 text-start d-flex align-items-center gap-3 px-3 py-2 rounded-3 border-0 transition-all ${currentTab === item.id
-                    ? "bg-primary bg-opacity-10 text-primary fw-bold"
-                    : "text-secondary hover-bg-light"
+                  ? "bg-primary bg-opacity-10 text-primary fw-bold"
+                  : "text-secondary hover-bg-light"
                   }`}
                 style={{ background: 'transparent' }}
               >
@@ -106,14 +137,14 @@ export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose, d
 
         <div className="d-flex align-items-center gap-3 px-3 py-3 mt-2">
           <img
-            alt="User Profile"
+            alt={profile?.name || 'User Profile'}
             className="rounded-circle bg-light"
             style={{ width: '32px', height: '32px' }}
-            src="https://picsum.photos/seed/admin/100/100"
+            src={profile?.avatarUrl || `https://picsum.photos/seed/admin/100/100`}
             referrerPolicy="no-referrer"
           />
           <div className="overflow-hidden">
-            <p className="mb-0 fw-bold text-truncate" style={{ fontSize: '12px' }}>Admin User</p>
+            <p className="mb-0 fw-bold text-truncate" style={{ fontSize: '12px' }}>{profile?.name || 'Admin User'}</p>
             <p className="mb-0 text-muted" style={{ fontSize: '10px' }}>Premium Plan</p>
           </div>
         </div>

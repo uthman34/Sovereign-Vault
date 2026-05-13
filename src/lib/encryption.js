@@ -5,24 +5,33 @@
  */
 
 const ALGORITHM = 'AES-GCM';
+const PBKDF2_ITERATIONS = 50000;
+
+const keyMaterialCache = new Map();
 
 async function deriveKey(passphrase, salt) {
   const enc = new TextEncoder();
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw',
-    enc.encode(passphrase),
-    'PBKDF2',
-    false,
-    ['deriveBits', 'deriveKey']
-  );
+  let keyMaterial = keyMaterialCache.get(passphrase);
+
+  if (!keyMaterial) {
+    keyMaterial = crypto.subtle.importKey(
+      'raw',
+      enc.encode(passphrase),
+      'PBKDF2',
+      false,
+      ['deriveBits', 'deriveKey']
+    );
+    keyMaterialCache.set(passphrase, keyMaterial);
+  }
+
   return crypto.subtle.deriveKey(
     {
       name: 'PBKDF2',
       salt: salt,
-      iterations: 100000,
+      iterations: PBKDF2_ITERATIONS,
       hash: 'SHA-256'
     },
-    keyMaterial,
+    await keyMaterial,
     { name: ALGORITHM, length: 256 },
     true,
     ['encrypt', 'decrypt']
@@ -33,7 +42,7 @@ export async function encryptFile(file, passphrase) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await deriveKey(passphrase, salt);
-  
+
   const arrayBuffer = await file.arrayBuffer();
   const encryptedContent = await crypto.subtle.encrypt(
     { name: ALGORITHM, iv },
@@ -46,7 +55,7 @@ export async function encryptFile(file, passphrase) {
   combined.set(salt, 0);
   combined.set(iv, salt.length);
   combined.set(new Uint8Array(encryptedContent), salt.length + iv.length);
-  
+
   return new Blob([combined], { type: 'application/octet-stream' });
 }
 
@@ -57,7 +66,7 @@ export async function decryptFile(blob, passphrase) {
   const encryptedContent = combined.slice(28);
 
   const key = await deriveKey(passphrase, salt);
-  
+
   try {
     const decryptedContent = await crypto.subtle.decrypt(
       { name: ALGORITHM, iv },
