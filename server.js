@@ -104,7 +104,23 @@ const connectDB = async () => {
     } else {
       console.error("❌ MongoDB connection error:", err.message);
     }
-    console.log("⚠️ App will continue with limited functionality for development.");
+
+    try {
+      if (!mongoMemoryServer) {
+        mongoMemoryServer = await MongoMemoryServer.create({ instance: { dbName: "sovereign_archive" } });
+      }
+
+      await mongoose.connect(mongoMemoryServer.getUri(), {
+        serverSelectionTimeoutMS: 5000,
+      });
+
+      databaseHealth.mode = "Memory";
+      databaseHealth.status = "connected";
+      console.log("MongoDB connected successfully (Memory fallback)");
+    } catch (memoryErr) {
+      console.error("❌ MongoDB memory fallback failed:", memoryErr.message);
+      console.log("⚠️ App will continue with limited functionality for development.");
+    }
   }
 };
 
@@ -181,6 +197,21 @@ async function startServer() {
     });
   };
 
+  const storeBufferLocally = async (buffer, originalName = "encrypted-asset.enc") => {
+    const safeName = path.basename(originalName).replace(/[^a-zA-Z0-9._-]+/g, "_") || "encrypted-asset.enc";
+    const storedName = `${crypto.randomUUID()}-${safeName}`;
+    const storagePath = path.join(uploadsDir, storedName);
+
+    await fs.promises.writeFile(storagePath, buffer);
+
+    return {
+      storageProvider: "local",
+      storagePath,
+      storedName,
+      encryptedSize: buffer.length,
+    };
+  };
+
   const isCloudinaryAuthError = (error) => {
     const message = `${error?.message || ""}`.toLowerCase();
     return error?.http_code === 401
@@ -195,6 +226,14 @@ async function startServer() {
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 5, // 5 requests per windowMs
     message: "Too many authentication attempts, please try again after 15 minutes",
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
+  const profileLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 60,
+    message: "Too many profile requests, please try again later",
     standardHeaders: true,
     legacyHeaders: false,
   });
@@ -391,7 +430,7 @@ async function startServer() {
   );
 
   // Protected route example
-  app.get("/api/auth/me", authLimiter, verifyToken, async (req, res) => {
+  app.get("/api/auth/me", profileLimiter, verifyToken, async (req, res) => {
     try {
       const user = await UserModel.findById(req.user.id).select("-password -resetToken -resetTokenExpiry").lean();
       if (!user) {
@@ -568,10 +607,14 @@ async function startServer() {
     }
   });
 
-  // API logs endpoints
-  app.get("/api/logs", async (req, res) => {
+  // API logs endpoints (per-user)
+  app.get("/api/logs", verifyToken, async (req, res) => {
     try {
-      const logs = await AuditModel.find().sort({ timestamp: 1, _id: 1 }).lean();
+      // Only return audit entries belonging to the authenticated user
+      const userId = req.user?.id;
+      if (!userId) return res.status(401).json({ error: "Authentication required" });
+
+      const logs = await AuditModel.find({ userId }).sort({ timestamp: 1, _id: 1 }).lean();
       res.json(logs);
     } catch (err) {
       console.error("Logs lookup error:", err);
@@ -579,19 +622,24 @@ async function startServer() {
     }
   });
 
-  app.post("/api/logs", async (req, res) => {
+  app.post("/api/logs", verifyToken, async (req, res) => {
     try {
-      const { action, details, previousHash, hash, timestamp, userId } = req.body || {};
+      console.log('Saving audit log, user:', req.user?.id);
+      console.log('Incoming log body:', req.body);
+      const { action, details, previousHash, hash, timestamp } = req.body || {};
 
       if (!action || !details) {
         return res.status(400).json({ error: "Invalid log entry" });
       }
 
-      const lastEntry = await AuditModel.findOne().sort({ timestamp: -1, _id: -1 }).lean();
+      // Force the userId to the authenticated user to prevent spoofing
+      const userId = req.user?.id || null;
+
+      const lastEntry = await AuditModel.findOne({ userId }).sort({ timestamp: -1, _id: -1 }).lean();
       const resolvedPreviousHash = previousHash || lastEntry?.hash || "0000000000000000";
       const resolvedTimestamp = timestamp ? new Date(timestamp) : new Date();
       const payload = {
-        userId: userId || null,
+        userId,
         action,
         details,
         timestamp: resolvedTimestamp.toISOString(),
@@ -600,7 +648,7 @@ async function startServer() {
       const resolvedHash = hash || crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 
       const entry = await AuditModel.create({
-        userId: userId || null,
+        userId,
         action,
         details,
         timestamp: resolvedTimestamp,
@@ -626,30 +674,37 @@ async function startServer() {
       const mimeType = (req.body.mimeType || "application/octet-stream").toString();
       const encryptedSize = Number(req.file.size || req.body.originalSize || 0);
 
-      let storedAssetData = {
-        storageProvider: "local",
-        storagePath: req.file.path,
-        storedName: req.file.filename,
-        encryptedSize,
-      };
+      let storedAssetData;
 
-      if (cloudinaryConfigured) {
-        const publicId = `${req.user.id}/${Date.now()}-${crypto.randomUUID()}`;
-        const uploadResult = await uploadBufferToCloudinary(req.file.buffer, {
-          resource_type: "raw",
-          folder: cloudinaryFolder,
-          public_id: publicId,
-          overwrite: true,
-        });
+      if (cloudinaryConfigured && req.file.buffer) {
+        try {
+          const publicId = `${req.user.id}/${Date.now()}-${crypto.randomUUID()}`;
+          const uploadResult = await uploadBufferToCloudinary(req.file.buffer, {
+            resource_type: "raw",
+            folder: cloudinaryFolder,
+            public_id: publicId,
+            overwrite: true,
+          });
 
+          storedAssetData = {
+            storageProvider: "cloudinary",
+            storagePath: null,
+            storedName: originalName,
+            encryptedSize: Number(uploadResult.bytes || encryptedSize),
+            cloudinaryPublicId: uploadResult.public_id,
+            cloudinarySecureUrl: uploadResult.secure_url,
+            cloudinaryResourceType: uploadResult.resource_type || "raw",
+          };
+        } catch (cloudinaryError) {
+          console.warn("Cloudinary upload failed, falling back to local storage:", cloudinaryError);
+          storedAssetData = await storeBufferLocally(req.file.buffer, req.file.originalname || originalName);
+        }
+      } else {
         storedAssetData = {
-          storageProvider: "cloudinary",
-          storagePath: null,
-          storedName: originalName,
-          encryptedSize: Number(uploadResult.bytes || encryptedSize),
-          cloudinaryPublicId: uploadResult.public_id,
-          cloudinarySecureUrl: uploadResult.secure_url,
-          cloudinaryResourceType: uploadResult.resource_type || "raw",
+          storageProvider: "local",
+          storagePath: req.file.path,
+          storedName: req.file.filename,
+          encryptedSize,
         };
       }
 
@@ -690,6 +745,12 @@ async function startServer() {
       if (isCloudinaryAuthError(err)) {
         return res.status(502).json({
           error: "Cloudinary credentials are invalid. Check CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.",
+        });
+      }
+
+      if (err?.message) {
+        return res.status(500).json({
+          error: `Failed to store encrypted file: ${err.message}`,
         });
       }
 

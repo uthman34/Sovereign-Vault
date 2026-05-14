@@ -16,35 +16,68 @@ import { Button } from "./ui/Button";
 export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose, databaseHealth }) {
   const [profile, setProfile] = React.useState(null);
 
+  const applyStoredProfile = React.useCallback(() => {
+    try {
+      const stored = localStorage.getItem('sv_user');
+      if (!stored) return null;
+      return JSON.parse(stored);
+    } catch (err) {
+      console.warn('Failed to read stored profile:', err);
+      return null;
+    }
+  }, []);
+
+  const refreshProfile = React.useCallback(async () => {
+    try {
+      const token = localStorage.getItem('sv_token');
+      if (!token) {
+        setProfile(null);
+        return;
+      }
+
+      const cachedProfile = applyStoredProfile();
+      if (cachedProfile) {
+        setProfile(cachedProfile);
+      }
+
+      const res = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } });
+      let data = null;
+      try {
+        data = await res.json();
+      } catch (e) {
+        data = null;
+      }
+
+      if (res.ok && data?.user) {
+        setProfile(data.user);
+        localStorage.setItem('sv_user', JSON.stringify(data.user));
+        return;
+      }
+    } catch (err) {
+      console.error('Failed to fetch profile:', err);
+    }
+  }, [applyStoredProfile]);
+
   React.useEffect(() => {
     let mounted = true;
-    (async () => {
-      try {
-        const token = localStorage.getItem('sv_token');
-        if (!token) return;
-        const res = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } });
-        let data = null;
-        try {
-          data = await res.json();
-        } catch (e) {
-          // non-JSON or empty response
-          const text = await res.text().catch(() => '');
-          console.warn('Non-JSON /api/auth/me response:', res.status, text);
-          data = null;
-        }
+    refreshProfile().then(() => {
+      if (!mounted) return;
+    });
 
-        if (!res.ok) {
-          console.warn('/api/auth/me returned', res.status, data);
-          return;
-        }
+    const handleProfileUpdated = () => {
+      if (!mounted) return;
+      refreshProfile();
+    };
 
-        if (mounted) setProfile(data?.user || null);
-      } catch (err) {
-        console.error('Failed to fetch profile:', err);
-      }
-    })();
-    return () => { mounted = false; };
-  }, []);
+    window.addEventListener('sv-profile-updated', handleProfileUpdated);
+    window.addEventListener('storage', handleProfileUpdated);
+
+    return () => {
+      mounted = false;
+      window.removeEventListener('sv-profile-updated', handleProfileUpdated);
+      window.removeEventListener('storage', handleProfileUpdated);
+    };
+  }, [refreshProfile]);
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "library", label: "Library", icon: Library },
@@ -53,15 +86,6 @@ export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose, d
     { id: "settings", label: "Settings", icon: Settings },
     { id: "admin", label: "Admin", icon: ShieldCheck },
   ];
-
-  const databaseMode = databaseHealth?.mode || "Disconnected";
-  const databaseStatus = databaseHealth?.status || "disconnected";
-  const statusPalette = {
-    Remote: { background: "#dcfce7", color: "#166534" },
-    Memory: { background: "#fef3c7", color: "#92400e" },
-    Disconnected: { background: "#fee2e2", color: "#991b1b" },
-  };
-  const statusStyle = statusPalette[databaseMode] || statusPalette.Disconnected;
 
   return (
     <aside className={`sidebar d-flex flex-column ${isOpen ? "show" : ""}`}>
@@ -110,22 +134,6 @@ export function Sidebar({ currentTab, onTabChange, onSignOut, isOpen, onClose, d
       </nav>
 
       <div className="mt-auto pt-3 border-top">
-        <div className="px-3 pb-3">
-          <div className="d-flex align-items-center justify-content-between mb-2">
-            <span className="text-uppercase text-muted fw-bold" style={{ fontSize: '10px', letterSpacing: '1px' }}>Database</span>
-            <span
-              className="badge rounded-pill px-2 py-1"
-              style={{ background: statusStyle.background, color: statusStyle.color, fontSize: '10px' }}
-            >
-              {databaseMode}
-            </span>
-          </div>
-          <p className="mb-0 text-muted" style={{ fontSize: '12px' }}>
-            {databaseStatus === "connected"
-              ? "Backend connection is available for uploads and file listings."
-              : "No live database connection detected right now."}
-          </p>
-        </div>
         <button
           onClick={onSignOut}
           className="btn btn-link text-decoration-none text-danger w-100 text-start d-flex align-items-center gap-3 px-3 py-2"

@@ -102,7 +102,7 @@ export default function Dashboard() {
       <div className="mb-5 d-flex justify-content-between align-items-end">
         <div>
           <h2 className="display-6 fw-bold mb-1">Archive Overview</h2>
-          <p className="text-muted fw-medium mb-0">Live storage and audit data from your MERN backend.</p>
+          <p className="text-muted fw-medium mb-0">Live storage and audit data with Sovereign Archive.</p>
         </div>
         <Badge variant="primary" className="d-flex align-items-center gap-2 py-2 px-3 shadow-sm border-0">
           <Sparkles size={14} />

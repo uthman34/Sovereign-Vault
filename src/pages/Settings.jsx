@@ -143,7 +143,14 @@ export default function Settings() {
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || 'Failed to update profile');
-            setProfile(data.user || profile);
+            const nextProfile = data.user || profile;
+            setProfile(nextProfile);
+            try {
+                localStorage.setItem('sv_user', JSON.stringify(nextProfile || {}));
+            } catch (storageErr) {
+                console.warn('Failed to persist updated profile:', storageErr);
+            }
+            window.dispatchEvent(new Event('sv-profile-updated'));
             setMessage('Profile updated');
             setMessageType('success');
         } catch (err) {
@@ -171,7 +178,14 @@ export default function Settings() {
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || 'Avatar upload failed');
-            setProfile((p) => ({ ...(p || {}), avatarUrl: data.avatarUrl }));
+            const nextProfile = { ...(profile || {}), avatarUrl: data.avatarUrl };
+            setProfile(nextProfile);
+            try {
+                localStorage.setItem('sv_user', JSON.stringify(nextProfile));
+            } catch (storageErr) {
+                console.warn('Failed to persist avatar update:', storageErr);
+            }
+            window.dispatchEvent(new Event('sv-profile-updated'));
             setAvatarFile(null);
             setMessage('Avatar uploaded');
             setMessageType('success');
