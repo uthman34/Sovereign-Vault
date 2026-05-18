@@ -86,15 +86,19 @@ const connectDB = async () => {
 
     const connectionUri = hasRemoteUri
       ? uri
-      : (mongoMemoryServer || (mongoMemoryServer = await MongoMemoryServer.create({ instance: { dbName: "sovereign_archive" } }))).getUri();
+      : null;
+
+    if (!connectionUri) {
+      throw new Error("No MongoDB URI available. Set MONGODB_URI environment variable or provide remote database credentials.");
+    }
 
     await mongoose.connect(connectionUri, {
-      serverSelectionTimeoutMS: 5000, // Timeout after 5 seconds
+      serverSelectionTimeoutMS: 5000,
     });
 
-    databaseHealth.mode = hasRemoteUri ? "Remote" : "Memory";
+    databaseHealth.mode = "Remote";
     databaseHealth.status = "connected";
-    console.log(`MongoDB connected successfully (${databaseHealth.mode})`);
+    console.log("✅ MongoDB connected successfully");
   } catch (err) {
     databaseHealth.mode = "Disconnected";
     databaseHealth.status = "disconnected";
@@ -104,23 +108,7 @@ const connectDB = async () => {
     } else {
       console.error("❌ MongoDB connection error:", err.message);
     }
-
-    try {
-      if (!mongoMemoryServer) {
-        mongoMemoryServer = await MongoMemoryServer.create({ instance: { dbName: "sovereign_archive" } });
-      }
-
-      await mongoose.connect(mongoMemoryServer.getUri(), {
-        serverSelectionTimeoutMS: 5000,
-      });
-
-      databaseHealth.mode = "Memory";
-      databaseHealth.status = "connected";
-      console.log("MongoDB connected successfully (Memory fallback)");
-    } catch (memoryErr) {
-      console.error("❌ MongoDB memory fallback failed:", memoryErr.message);
-      console.log("⚠️ App will continue with limited functionality for development.");
-    }
+    console.log("⚠️  App will continue with limited functionality (no database).");
   }
 };
 
